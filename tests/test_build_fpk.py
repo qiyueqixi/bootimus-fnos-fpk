@@ -82,6 +82,11 @@ class BuildFpkTests(unittest.TestCase):
 # prepare_network_namespace
 # DHCP uses macvlan
 # python timeout fallback
+# sync_external_iso_files
+# mount_external_iso_files
+# unmount_external_iso_files
+# external_iso_mount_target_from_marker
+# External ISO directory is read-only
 echo ok
 """,
             )
@@ -122,6 +127,7 @@ exit 0
 # keep_all
 # delete_all
 # safe_delete_tree()
+# unmount_external_iso_files
 # preserving bootimus ISO/data directory
 exit 0
 """,
@@ -368,6 +374,12 @@ exit 0
         self.assertIn('BOOTIMUS_INTERNAL_ISO_DIR="${BOOTIMUS_DATA_DIR}/isos"', main)
         self.assertIn("BOOTIMUS_ISO_DIR", main)
         self.assertIn("mount --bind", main)
+        self.assertIn("sync_external_iso_files", main)
+        self.assertIn("mount_external_iso_files", main)
+        self.assertIn("unmount_external_iso_files", main)
+        self.assertIn("external_iso_mount_target_from_marker", main)
+        self.assertIn("External ISO directory is read-only", main)
+        self.assertNotIn('mount --bind "${BOOTIMUS_ISO_DIR}" "${BOOTIMUS_INTERNAL_ISO_DIR}"', main)
         self.assertIn("BOOTIMUS_ADMIN_PASSWORD", main)
         self.assertIn("/api/login", main)
         self.assertIn("/api/users/reset-password", main)
@@ -442,6 +454,7 @@ exit 0
             "keep_all",
             "delete_all",
             "safe_delete_tree()",
+            "unmount_external_iso_files",
             "uninstall requested; keeping user data",
             "uninstall requested; deleting all app data",
             "preserving bootimus ISO/data directory",

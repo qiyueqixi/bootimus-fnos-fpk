@@ -389,7 +389,7 @@ prepare_dirs() {
 
 is_mounted_path() {
     target="$1"
-    [ -d "${target}" ] || return 1
+    [ -e "${target}" ] || return 1
     if command -v mountpoint >/dev/null 2>&1; then
         mountpoint -q "${target}"
         return $?
@@ -397,13 +397,96 @@ is_mounted_path() {
     awk -v target="${target}" '$2 == target { found = 1 } END { exit(found ? 0 : 1) }' /proc/mounts 2>/dev/null
 }
 
+external_iso_mount_target_from_marker() {
+    marker="$1"
+    source_file="$(cat "${marker}" 2>/dev/null || true)"
+    rel_marker="${marker#${BOOTIMUS_INTERNAL_ISO_DIR}/}"
+    rel_base="${rel_marker%/.bootimus-external-iso}"
+    if [ -n "${source_file}" ]; then
+        ext="${source_file##*.}"
+    else
+        ext="iso"
+    fi
+    printf '%s/%s.%s' "${BOOTIMUS_INTERNAL_ISO_DIR}" "${rel_base}" "${ext}"
+}
+
+unmount_external_iso_files() {
+    [ -d "${BOOTIMUS_INTERNAL_ISO_DIR}" ] || return 0
+    find "${BOOTIMUS_INTERNAL_ISO_DIR}" -type f -name '.bootimus-external-iso' -print 2>/dev/null | while IFS= read -r marker; do
+        target="$(external_iso_mount_target_from_marker "${marker}")"
+        if is_mounted_path "${target}"; then
+            umount "${target}" 2>/dev/null || umount -l "${target}" 2>/dev/null || {
+                echo "failed to unmount ISO bind mount: ${target}"
+                exit 1
+            }
+        fi
+    done
+}
+
 unmount_internal_iso_dir() {
+    unmount_external_iso_files || return 1
     if is_mounted_path "${BOOTIMUS_INTERNAL_ISO_DIR}"; then
         umount "${BOOTIMUS_INTERNAL_ISO_DIR}" 2>/dev/null || umount -l "${BOOTIMUS_INTERNAL_ISO_DIR}" 2>/dev/null || {
             echo "failed to unmount ISO bind mount: ${BOOTIMUS_INTERNAL_ISO_DIR}"
             return 1
         }
     fi
+}
+
+remove_stale_external_iso_mounts() {
+    find "${BOOTIMUS_INTERNAL_ISO_DIR}" -type f -name '.bootimus-external-iso' -print 2>/dev/null | while IFS= read -r marker; do
+        target="$(external_iso_mount_target_from_marker "${marker}")"
+        [ -e "${target}" ] || rmdir "$(dirname "${marker}")" 2>/dev/null || true
+    done
+}
+
+sync_external_iso_files() {
+    [ -n "${BOOTIMUS_ISO_DIR}" ] || return 0
+    [ -d "${BOOTIMUS_ISO_DIR}" ] || return 0
+
+    find "${BOOTIMUS_INTERNAL_ISO_DIR}" -type f -name '.bootimus-external-iso' -print 2>/dev/null | while IFS= read -r marker; do
+        source_file="$(cat "${marker}" 2>/dev/null || true)"
+        mountpoint_dir="$(dirname "${marker}")"
+        mountpoint_file="$(external_iso_mount_target_from_marker "${marker}")"
+        if [ -z "${source_file}" ] || [ ! -f "${source_file}" ]; then
+            if is_mounted_path "${mountpoint_file}"; then
+                umount "${mountpoint_file}" 2>/dev/null || umount -l "${mountpoint_file}" 2>/dev/null || true
+            fi
+            rm -f "${mountpoint_file}" "${marker}" 2>/dev/null || true
+            rmdir "${mountpoint_dir}" 2>/dev/null || true
+        fi
+    done
+}
+
+mount_external_iso_files() {
+    [ -n "${BOOTIMUS_ISO_DIR}" ] || return 0
+    [ -d "${BOOTIMUS_ISO_DIR}" ] || return 0
+
+    # External ISO directory is read-only from Bootimus' point of view:
+    # only .iso files are bind-mounted into the app data directory, while
+    # extracted boot files stay under ${BOOTIMUS_INTERNAL_ISO_DIR}.
+    find "${BOOTIMUS_ISO_DIR}" -type f -iname '*.iso' -print 2>/dev/null | while IFS= read -r source_file; do
+        filename="$(basename "${source_file}")"
+        rel_path="${source_file#${BOOTIMUS_ISO_DIR}/}"
+        target_file="${BOOTIMUS_INTERNAL_ISO_DIR}/${rel_path}"
+        mkdir -p "$(dirname "${target_file}")"
+        if [ ! -e "${target_file}" ]; then
+            : >"${target_file}"
+        fi
+        if is_mounted_path "${target_file}"; then
+            umount "${target_file}" 2>/dev/null || umount -l "${target_file}" 2>/dev/null || {
+                echo "failed to refresh ISO bind mount: ${target_file}"
+                exit 1
+            }
+        fi
+        mount --bind "${source_file}" "${target_file}" || {
+            echo "failed to bind mount ISO file ${source_file} to ${target_file}"
+            exit 1
+        }
+        marker_dir="${BOOTIMUS_INTERNAL_ISO_DIR}/$(dirname "${rel_path}")/${filename%.*}"
+        mkdir -p "${marker_dir}"
+        printf '%s\n' "${source_file}" >"${marker_dir}/.bootimus-external-iso" 2>/dev/null || true
+    done
 }
 
 prepare_iso_dir() {
@@ -414,13 +497,12 @@ prepare_iso_dir() {
             mkdir -p "${BOOTIMUS_INTERNAL_ISO_DIR}"
         fi
         unmount_internal_iso_dir || return 1
-        mount --bind "${BOOTIMUS_ISO_DIR}" "${BOOTIMUS_INTERNAL_ISO_DIR}" || {
-            echo "failed to bind mount ISO directory ${BOOTIMUS_ISO_DIR} to ${BOOTIMUS_INTERNAL_ISO_DIR}"
-            return 1
-        }
+        sync_external_iso_files
+        mount_external_iso_files || return 1
     else
         mkdir -p "${BOOTIMUS_INTERNAL_ISO_DIR}"
     fi
+    remove_stale_external_iso_mounts
 }
 
 prepare_config() {

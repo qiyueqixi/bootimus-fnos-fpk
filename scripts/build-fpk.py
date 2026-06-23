@@ -347,11 +347,18 @@ def validate_source(source_dir: Path) -> None:
         "prepare_network_namespace",
         "DHCP uses macvlan",
         "python timeout fallback",
+        "sync_external_iso_files",
+        "mount_external_iso_files",
+        "unmount_external_iso_files",
+        "external_iso_mount_target_from_marker",
+        "External ISO directory is read-only",
     ]:
         if marker not in main_text:
             raise ValueError(f"cmd/main must contain {marker}")
     if "falling back to host network" in main_text:
         raise ValueError("cmd/main must not downgrade independent IP mode to host when address is empty")
+    if 'mount --bind "${BOOTIMUS_ISO_DIR}" "${BOOTIMUS_INTERNAL_ISO_DIR}"' in main_text:
+        raise ValueError("cmd/main must bind-mount only ISO files, not the whole external ISO directory")
 
     wizard_uninstall = json.loads((source_dir / "wizard" / "uninstall").read_text(encoding="utf-8"))
     wizard_uninstall_text = json.dumps(wizard_uninstall, ensure_ascii=False)
@@ -365,6 +372,7 @@ def validate_source(source_dir: Path) -> None:
         "keep_all",
         "delete_all",
         "safe_delete_tree()",
+        "unmount_external_iso_files",
         "preserving bootimus ISO/data directory",
     ]:
         if marker not in uninstall_callback_text:

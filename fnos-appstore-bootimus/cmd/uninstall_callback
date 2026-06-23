@@ -73,7 +73,7 @@ safe_delete_tree() {
 
 is_mounted_path() {
     target="$1"
-    [ -d "${target}" ] || return 1
+    [ -e "${target}" ] || return 1
     if command -v mountpoint >/dev/null 2>&1; then
         mountpoint -q "${target}"
         return $?
@@ -81,7 +81,20 @@ is_mounted_path() {
     awk -v target="${target}" '$2 == target { found = 1 } END { exit(found ? 0 : 1) }' /proc/mounts 2>/dev/null
 }
 
+unmount_external_iso_files() {
+    [ -d "${BOOTIMUS_INTERNAL_ISO_DIR}" ] || return 0
+    find "${BOOTIMUS_INTERNAL_ISO_DIR}" -type f \( -iname '*.iso' -o -iname '*.ISO' \) -print 2>/dev/null | while IFS= read -r target; do
+        if is_mounted_path "${target}"; then
+            umount "${target}" 2>/dev/null || umount -l "${target}" 2>/dev/null || {
+                log_msg "failed to unmount ISO bind mount: ${target}"
+                exit 1
+            }
+        fi
+    done
+}
+
 unmount_internal_iso_dir() {
+    unmount_external_iso_files || return 1
     if is_mounted_path "${BOOTIMUS_INTERNAL_ISO_DIR}"; then
         umount "${BOOTIMUS_INTERNAL_ISO_DIR}" 2>/dev/null || umount -l "${BOOTIMUS_INTERNAL_ISO_DIR}" 2>/dev/null || {
             log_msg "failed to unmount ISO bind mount: ${BOOTIMUS_INTERNAL_ISO_DIR}"
