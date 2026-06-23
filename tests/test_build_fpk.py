@@ -62,7 +62,13 @@ class BuildFpkTests(unittest.TestCase):
 # type macvlan mode bridge
 # ip netns exec
 # BOOTIMUS_LAUNCH_PROXY_PID_FILE
+# BOOTIMUS_NETWORK_WATCHER_PID_FILE
 # start_launch_redirect
+# start_network_watcher
+# stop_network_watcher
+# network watcher detected IP change
+# network watcher restarting Bootimus
+# bootimus_service_ip
 # BOOTIMUS_NETWORK_DHCP
 # run_network_dhcp
 # udhcpc
@@ -372,7 +378,13 @@ exit 0
         self.assertIn("type macvlan mode bridge", main)
         self.assertIn("ip netns exec", main)
         self.assertIn("BOOTIMUS_LAUNCH_PROXY_PID_FILE", main)
+        self.assertIn("BOOTIMUS_NETWORK_WATCHER_PID_FILE", main)
         self.assertIn("start_launch_redirect", main)
+        self.assertIn("start_network_watcher", main)
+        self.assertIn("stop_network_watcher", main)
+        self.assertIn("network watcher detected IP change", main)
+        self.assertIn("network watcher restarting Bootimus", main)
+        self.assertIn("bootimus_service_ip", main)
         self.assertIn("BOOTIMUS_NETWORK_DHCP", main)
         self.assertIn("run_network_dhcp", main)
         self.assertIn("udhcpc", main)
