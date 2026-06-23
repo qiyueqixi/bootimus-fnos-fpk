@@ -85,6 +85,15 @@ class BuildFpkTests(unittest.TestCase):
 # prepare_network_namespace
 # DHCP uses macvlan
 # python timeout fallback
+# normalize_windows_wimboot_params
+# wimboot rawbcd compatibility
+# sqlite3.connect(db_path)
+# UPDATE distro_profiles
+# UPDATE images
+# REPLACE
+# rawbcd
+# Windows wimboot boot_params normalized
+# start_app normalized Windows wimboot params
 # sync_external_iso_files
 # mount_external_iso_files
 # unmount_external_iso_files
@@ -469,6 +478,23 @@ exit 0
             self.assertIn(marker, uninstall_callback)
         self.assertNotIn("load_saved_bootimus_data_dir()", uninstall_callback)
         self.assertNotIn("BOOTIMUS_DATA_DIR", uninstall_callback)
+
+    def test_source_normalizes_windows_wimboot_params_for_uefi(self):
+        main = (ROOT / "fnos-appstore-bootimus" / "cmd" / "main").read_text(encoding="utf-8")
+
+        self.assertIn("normalize_windows_wimboot_params", main)
+        self.assertIn("wimboot rawbcd compatibility", main)
+        self.assertIn("sqlite3.connect(db_path)", main)
+        self.assertIn("UPDATE distro_profiles", main)
+        self.assertIn("UPDATE images", main)
+        self.assertIn("REPLACE", main)
+        self.assertIn("rawbcd", main)
+        self.assertIn("Windows wimboot boot_params normalized", main)
+        self.assertIn("start_app normalized Windows wimboot params", main)
+
+        start_app = main[main.index("start_app() {"):main.index("stop_app() {")]
+        self.assertIn("normalize_windows_wimboot_params", start_app)
+        self.assertLess(start_app.index("normalize_windows_wimboot_params"), start_app.index("apply_admin_password"))
 
 
 if __name__ == "__main__":
