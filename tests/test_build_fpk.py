@@ -64,6 +64,9 @@ class BuildFpkTests(unittest.TestCase):
 # BOOTIMUS_LAUNCH_PROXY_PID_FILE
 # BOOTIMUS_NETWORK_WATCHER_PID_FILE
 # start_launch_redirect
+# start_python_launch_redirect
+# do_HEAD
+# wait_for_launch_redirect_pid
 # start_network_watcher
 # stop_network_watcher
 # network watcher detected IP change
@@ -392,6 +395,10 @@ exit 0
         self.assertIn("BOOTIMUS_LAUNCH_PROXY_PID_FILE", main)
         self.assertIn("BOOTIMUS_NETWORK_WATCHER_PID_FILE", main)
         self.assertIn("start_launch_redirect", main)
+        self.assertIn("start_python_launch_redirect", main)
+        self.assertIn("do_HEAD", main)
+        self.assertIn("wait_for_launch_redirect_pid", main)
+        self.assertLess(main.index("start_python_launch_redirect"), main.index("busybox httpd"))
         self.assertIn("start_network_watcher", main)
         self.assertIn("stop_network_watcher", main)
         self.assertIn("network watcher detected IP change", main)
