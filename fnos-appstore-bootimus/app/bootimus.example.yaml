@@ -1,0 +1,19 @@
+# Bootimus configuration used by the fnOS package on first start.
+tftp_port: 69
+http_port: 8080
+admin_port: 8081
+nbd_enabled: true
+nbd_port: 10809
+nfs_enabled: false
+nfs_port: 2049
+data_dir: ./data
+server_addr: ""
+disable_remote_profiles: false
+proxy_dhcp:
+  enabled: true
+  bootfile_bios: undionly.kpxe
+  bootfile_uefi: bootimus.efi
+  bootfile_arm64: bootimus-arm64.efi
+windows_smb:
+  enabled: false
+  port: 445

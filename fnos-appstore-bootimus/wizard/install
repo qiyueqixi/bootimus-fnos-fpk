@@ -1,0 +1,114 @@
+[
+  {
+    "stepTitle": "Bootimus 配置",
+    "items": [
+      {
+        "type": "tips",
+        "helpText": "Bootimus 的配置、数据库、bootloaders、autoinstall、tools 和日志会写入飞牛“应用文件 / bootimus”。默认账号 admin；初始密码首次启动随机生成，请在应用文件/bootimus/logs/bootimus.log 查看。下面只填写 ISO 镜像目录，建议使用专门放 ISO 文件的绝对路径。"
+      },
+      {
+        "type": "text",
+        "field": "wizard_bootimus_iso_dir",
+        "label": "ISO 镜像目录",
+        "initValue": "",
+        "rules": [
+          {
+            "pattern": "^(|/.+)$",
+            "message": "请填写以 / 开头的绝对路径，或留空使用应用文件里的默认 ISO 目录"
+          }
+        ]
+      },
+      {
+        "type": "tips",
+        "helpText": "这个目录只用于放 ISO 文件。应用启动时会把它挂载到 Bootimus 数据目录里的 isos/，不会在这里生成 bootimus.db、bootloaders、autoinstall 或 tools。留空时 ISO 也放在应用文件/bootimus/data/isos。"
+      },
+      {
+        "type": "password",
+        "field": "wizard_bootimus_admin_password",
+        "label": "admin 初始密码",
+        "initValue": "",
+        "rules": [
+          {
+            "pattern": "^.{0,128}$",
+            "message": "密码最长 128 个字符；留空则使用 Bootimus 随机生成的初始密码"
+          }
+        ]
+      },
+      {
+        "type": "tips",
+        "helpText": "填写后首次启动会自动把 admin 密码改为这里的值；留空时请继续到应用文件/bootimus/logs/bootimus.log 查看随机密码。"
+      }
+    ]
+  },
+  {
+    "stepTitle": "网络配置",
+    "items": [
+      {
+        "type": "tips",
+        "helpText": "网络模式默认使用宿主机网络。需要给 Bootimus 单独一个局域网 IP 时，建议选择 macvlan；独立 IP/CIDR 留空时自动走 DHCP，填写后使用静态地址。ipvlan 更适合手动静态地址；如果选择 ipvlan 且留空 IP，安装时会自动改用 macvlan。飞牛打开按钮仍访问宿主 8081，启动脚本会跳转到独立 IP 的管理界面。"
+      },
+      {
+        "type": "radio",
+        "field": "wizard_bootimus_network_mode",
+        "label": "网络模式",
+        "initValue": "host",
+        "options": [
+          {
+            "label": "使用宿主机网络",
+            "value": "host"
+          },
+          {
+            "label": "独立 IP（macvlan，推荐 DHCP）",
+            "value": "macvlan"
+          },
+          {
+            "label": "独立 IP（ipvlan，静态地址）",
+            "value": "ipvlan"
+          }
+        ],
+        "rules": [
+          {
+            "required": true,
+            "message": "请选择网络模式"
+          }
+        ]
+      },
+      {
+        "type": "text",
+        "field": "wizard_bootimus_network_parent",
+        "label": "父网卡",
+        "initValue": "",
+        "rules": [
+          {
+            "pattern": "^(|[A-Za-z0-9_.:@-]+)$",
+            "message": "示例：eth0、br0 或 bond0；宿主机网络模式可留空"
+          }
+        ]
+      },
+      {
+        "type": "text",
+        "field": "wizard_bootimus_network_address",
+        "label": "独立 IP/CIDR",
+        "initValue": "",
+        "rules": [
+          {
+            "pattern": "^(|([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2})$",
+            "message": "示例：192.168.1.50/24；留空时独立 IP 模式自动走 DHCP"
+          }
+        ]
+      },
+      {
+        "type": "text",
+        "field": "wizard_bootimus_network_gateway",
+        "label": "网关",
+        "initValue": "",
+        "rules": [
+          {
+            "pattern": "^(|([0-9]{1,3}\\.){3}[0-9]{1,3})$",
+            "message": "示例：192.168.1.1；不需要默认路由时可留空"
+          }
+        ]
+      }
+    ]
+  }
+]

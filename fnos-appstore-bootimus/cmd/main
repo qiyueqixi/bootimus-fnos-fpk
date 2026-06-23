@@ -1,0 +1,927 @@
+#!/bin/bash
+set -eu
+
+APPNAME="App.Native.Bootimus"
+DEFAULT_TFTP_PORT="69"
+DEFAULT_HTTP_PORT="8080"
+DEFAULT_ADMIN_PORT="8081"
+DEFAULT_NBD_PORT="10809"
+DEFAULT_PROXY_DHCP="true"
+DEFAULT_EXTRA_ARGS=""
+DEFAULT_NETWORK_MODE="host"
+
+APPDEST="${TRIM_APPDEST:-/var/apps/${APPNAME}/target}"
+PKGVAR="${TRIM_PKGVAR:-/var/apps/${APPNAME}/var}"
+PKGETC="${TRIM_PKGETC:-/var/apps/${APPNAME}/etc}"
+TEMP_LOGFILE="${TRIM_TEMP_LOGFILE:-${PKGVAR}/last-error.log}"
+
+first_data_share_path() {
+    if [ -n "${TRIM_DATA_SHARE_PATHS:-}" ]; then
+        printf '%s' "${TRIM_DATA_SHARE_PATHS}" | tr ':;' '\n\n' | awk 'NF { print; exit }'
+        return 0
+    fi
+    if [ -d "/var/apps/${APPNAME}/shares/bootimus" ]; then
+        printf '/var/apps/%s/shares/bootimus' "${APPNAME}"
+        return 0
+    fi
+    printf '/var/apps/%s/data/bootimus' "${APPNAME}"
+}
+
+APP_SHARE="$(first_data_share_path)"
+DATA_ROOT="${APP_SHARE}"
+DEFAULT_BOOTIMUS_DATA_DIR="${DATA_ROOT}/data"
+CONFIG_FILE="${DATA_ROOT}/bootimus.yaml"
+ENV_FILE="${DATA_ROOT}/bootimus.env"
+LOG_DIR="${DATA_ROOT}/logs"
+LOG_FILE="${LOG_DIR}/bootimus.log"
+PID_FILE="${PKGVAR}/run/bootimus.pid"
+BOOTIMUS_LAUNCH_PROXY_PID_FILE="${PKGVAR}/run/launch-proxy.pid"
+BOOTIMUS_LAUNCH_DIR="${PKGVAR}/launch"
+RUNTIME_BIN="${PKGVAR}/bin/bootimus"
+WIZARD_DIR="${DATA_ROOT}/wizard"
+FALLBACK_WIZARD_DIR="${PKGVAR}/wizard"
+WIZARD_ISO_DIR_FILE="${WIZARD_DIR}/bootimus_iso_dir"
+FALLBACK_WIZARD_ISO_DIR_FILE="${FALLBACK_WIZARD_DIR}/bootimus_iso_dir"
+WIZARD_ADMIN_PASSWORD_FILE="${WIZARD_DIR}/bootimus_admin_password"
+FALLBACK_WIZARD_ADMIN_PASSWORD_FILE="${FALLBACK_WIZARD_DIR}/bootimus_admin_password"
+WIZARD_NETWORK_MODE_FILE="${WIZARD_DIR}/bootimus_network_mode"
+FALLBACK_WIZARD_NETWORK_MODE_FILE="${FALLBACK_WIZARD_DIR}/bootimus_network_mode"
+WIZARD_NETWORK_PARENT_FILE="${WIZARD_DIR}/bootimus_network_parent"
+FALLBACK_WIZARD_NETWORK_PARENT_FILE="${FALLBACK_WIZARD_DIR}/bootimus_network_parent"
+WIZARD_NETWORK_ADDRESS_FILE="${WIZARD_DIR}/bootimus_network_address"
+FALLBACK_WIZARD_NETWORK_ADDRESS_FILE="${FALLBACK_WIZARD_DIR}/bootimus_network_address"
+WIZARD_NETWORK_GATEWAY_FILE="${WIZARD_DIR}/bootimus_network_gateway"
+FALLBACK_WIZARD_NETWORK_GATEWAY_FILE="${FALLBACK_WIZARD_DIR}/bootimus_network_gateway"
+WIZARD_NETWORK_DHCP_FILE="${WIZARD_DIR}/bootimus_network_dhcp"
+FALLBACK_WIZARD_NETWORK_DHCP_FILE="${FALLBACK_WIZARD_DIR}/bootimus_network_dhcp"
+LEGACY_WIZARD_DATA_DIR_FILE="${WIZARD_DIR}/bootimus_data_dir"
+LEGACY_FALLBACK_WIZARD_DATA_DIR_FILE="${FALLBACK_WIZARD_DIR}/bootimus_data_dir"
+
+TFTP_PORT="${BOOTIMUS_TFTP_PORT:-${DEFAULT_TFTP_PORT}}"
+HTTP_PORT="${BOOTIMUS_HTTP_PORT:-${DEFAULT_HTTP_PORT}}"
+ADMIN_PORT="${BOOTIMUS_ADMIN_PORT:-${DEFAULT_ADMIN_PORT}}"
+NBD_PORT="${BOOTIMUS_NBD_PORT:-${DEFAULT_NBD_PORT}}"
+PROXY_DHCP="${BOOTIMUS_PROXY_DHCP:-${DEFAULT_PROXY_DHCP}}"
+EXTRA_ARGS="${BOOTIMUS_EXTRA_ARGS:-${DEFAULT_EXTRA_ARGS}}"
+BOOTIMUS_DATA_DIR="${BOOTIMUS_DATA_DIR:-${DEFAULT_BOOTIMUS_DATA_DIR}}"
+BOOTIMUS_ISO_DIR="${BOOTIMUS_ISO_DIR:-}"
+BOOTIMUS_ADMIN_PASSWORD="${BOOTIMUS_ADMIN_PASSWORD:-}"
+BOOTIMUS_INTERNAL_ISO_DIR="${BOOTIMUS_DATA_DIR}/isos"
+BOOTIMUS_NETWORK_MODE="${BOOTIMUS_NETWORK_MODE:-${DEFAULT_NETWORK_MODE}}"
+BOOTIMUS_NETWORK_PARENT="${BOOTIMUS_NETWORK_PARENT:-}"
+BOOTIMUS_NETWORK_ADDRESS="${BOOTIMUS_NETWORK_ADDRESS:-}"
+BOOTIMUS_NETWORK_GATEWAY="${BOOTIMUS_NETWORK_GATEWAY:-}"
+BOOTIMUS_NETWORK_DHCP="${BOOTIMUS_NETWORK_DHCP:-false}"
+BOOTIMUS_NETNS="${BOOTIMUS_NETNS:-bootimus-app}"
+BOOTIMUS_NETIF="${BOOTIMUS_NETIF:-btms0}"
+
+lifecycle_log() {
+    mkdir -p "${LOG_DIR}" "$(dirname "${TEMP_LOGFILE}")" 2>/dev/null || true
+    line="$(date '+%Y-%m-%d %H:%M:%S') lifecycle: $*"
+    echo "${line}" >>"${LOG_FILE}" 2>/dev/null || true
+    echo "${line}" >>"${TEMP_LOGFILE}" 2>/dev/null || true
+}
+
+run_with_timeout() {
+    seconds="$1"
+    shift
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "${seconds}" "$@"
+    elif command -v python3 >/dev/null 2>&1 || command -v python >/dev/null 2>&1; then
+        python_bin="$(command -v python3 2>/dev/null || command -v python)"
+        lifecycle_log "python timeout fallback seconds=${seconds} command=$*"
+        "${python_bin}" - "${seconds}" "$@" <<'PY'
+import subprocess
+import sys
+
+timeout = int(sys.argv[1])
+cmd = sys.argv[2:]
+try:
+    raise SystemExit(subprocess.run(cmd, timeout=timeout).returncode)
+except subprocess.TimeoutExpired:
+    raise SystemExit(124)
+PY
+    else
+        lifecycle_log "python timeout fallback unavailable; running command without timeout"
+        "$@"
+    fi
+}
+
+write_temp_log() {
+    mkdir -p "$(dirname "${TEMP_LOGFILE}")" 2>/dev/null || true
+    {
+        echo "Bootimus failed to start."
+        echo "APPDEST=${APPDEST}"
+        echo "PKGVAR=${PKGVAR}"
+        echo "APP_SHARE=${APP_SHARE}"
+        echo "DATA_ROOT=${DATA_ROOT}"
+        echo "BOOTIMUS_DATA_DIR=${BOOTIMUS_DATA_DIR}"
+        echo "BOOTIMUS_ISO_DIR=${BOOTIMUS_ISO_DIR}"
+        echo "BOOTIMUS_INTERNAL_ISO_DIR=${BOOTIMUS_INTERNAL_ISO_DIR}"
+        echo "BOOTIMUS_ADMIN_PASSWORD_SET=$([ -n "${BOOTIMUS_ADMIN_PASSWORD}" ] && echo yes || echo no)"
+        echo "BOOTIMUS_NETWORK_MODE=${BOOTIMUS_NETWORK_MODE}"
+        echo "BOOTIMUS_NETWORK_PARENT=${BOOTIMUS_NETWORK_PARENT}"
+        echo "BOOTIMUS_NETWORK_ADDRESS=${BOOTIMUS_NETWORK_ADDRESS}"
+        echo "BOOTIMUS_NETWORK_GATEWAY=${BOOTIMUS_NETWORK_GATEWAY}"
+        echo "BOOTIMUS_NETWORK_DHCP=${BOOTIMUS_NETWORK_DHCP}"
+        echo "BOOTIMUS_NETNS=${BOOTIMUS_NETNS}"
+        echo "CONFIG_FILE=${CONFIG_FILE}"
+        echo "LOG_FILE=${LOG_FILE}"
+        echo
+        echo "Recent Bootimus log:"
+        tail -n 80 "${LOG_FILE}" 2>/dev/null || true
+    } >"${TEMP_LOGFILE}" 2>/dev/null || true
+}
+
+refresh_internal_paths() {
+    BOOTIMUS_DATA_DIR="${DEFAULT_BOOTIMUS_DATA_DIR}"
+    BOOTIMUS_INTERNAL_ISO_DIR="${BOOTIMUS_DATA_DIR}/isos"
+}
+
+load_env_file() {
+    if [ -f "${ENV_FILE}" ]; then
+        set -a
+        # shellcheck disable=SC1090
+        . "${ENV_FILE}"
+        set +a
+        env_bootimus_data_dir="${BOOTIMUS_DATA_DIR:-}"
+        TFTP_PORT="${BOOTIMUS_TFTP_PORT:-${TFTP_PORT}}"
+        HTTP_PORT="${BOOTIMUS_HTTP_PORT:-${HTTP_PORT}}"
+        ADMIN_PORT="${BOOTIMUS_ADMIN_PORT:-${ADMIN_PORT}}"
+        NBD_PORT="${BOOTIMUS_NBD_PORT:-${NBD_PORT}}"
+        PROXY_DHCP="${BOOTIMUS_PROXY_DHCP:-${PROXY_DHCP}}"
+        EXTRA_ARGS="${BOOTIMUS_EXTRA_ARGS:-${EXTRA_ARGS}}"
+        BOOTIMUS_ISO_DIR="${BOOTIMUS_ISO_DIR:-}"
+        BOOTIMUS_ADMIN_PASSWORD="${BOOTIMUS_ADMIN_PASSWORD:-}"
+        BOOTIMUS_NETWORK_MODE="${BOOTIMUS_NETWORK_MODE:-${BOOTIMUS_NETWORK_MODE}}"
+        BOOTIMUS_NETWORK_PARENT="${BOOTIMUS_NETWORK_PARENT:-${BOOTIMUS_NETWORK_PARENT}}"
+        BOOTIMUS_NETWORK_ADDRESS="${BOOTIMUS_NETWORK_ADDRESS:-${BOOTIMUS_NETWORK_ADDRESS}}"
+        BOOTIMUS_NETWORK_GATEWAY="${BOOTIMUS_NETWORK_GATEWAY:-${BOOTIMUS_NETWORK_GATEWAY}}"
+        BOOTIMUS_NETWORK_DHCP="${BOOTIMUS_NETWORK_DHCP:-${BOOTIMUS_NETWORK_DHCP}}"
+        BOOTIMUS_NETNS="${BOOTIMUS_NETNS:-${BOOTIMUS_NETNS}}"
+        BOOTIMUS_NETIF="${BOOTIMUS_NETIF:-${BOOTIMUS_NETIF}}"
+        if [ -z "${BOOTIMUS_ISO_DIR}" ] && [ -n "${env_bootimus_data_dir}" ] && [ "${env_bootimus_data_dir}" != "${DEFAULT_BOOTIMUS_DATA_DIR}" ]; then
+            if [ -d "${env_bootimus_data_dir}/isos" ]; then
+                BOOTIMUS_ISO_DIR="${env_bootimus_data_dir}/isos"
+            else
+                BOOTIMUS_ISO_DIR="${env_bootimus_data_dir}"
+            fi
+        fi
+    fi
+    refresh_internal_paths
+}
+
+read_first_line() {
+    if [ -f "$1" ]; then
+        sed -n '1{s/\r$//;p;q;}' "$1"
+    fi
+}
+
+is_valid_absolute_path() {
+    value="$1"
+    case "${value}" in
+        "")
+            return 1
+            ;;
+        /*)
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    if printf '%s' "${value}" | LC_ALL=C grep -q '[[:cntrl:]]'; then
+        return 1
+    fi
+    return 0
+}
+
+is_valid_network_mode() {
+    case "$1" in
+        host|ipvlan|macvlan)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+is_valid_iface_name() {
+    value="$1"
+    [ -n "${value}" ] || return 1
+    printf '%s' "${value}" | LC_ALL=C grep -Eq '^[A-Za-z0-9_.:@-]+$'
+}
+
+is_valid_ipv4_cidr() {
+    value="$1"
+    printf '%s' "${value}" | LC_ALL=C grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$'
+}
+
+is_valid_ipv4() {
+    value="$1"
+    printf '%s' "${value}" | LC_ALL=C grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$'
+}
+
+is_truthy() {
+    case "$1" in
+        1|true|TRUE|yes|YES|on|ON)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+load_wizard_iso_dir() {
+    value="$(read_first_line "${WIZARD_ISO_DIR_FILE}")"
+    if [ -z "${value}" ]; then
+        value="$(read_first_line "${FALLBACK_WIZARD_ISO_DIR_FILE}")"
+    fi
+    if [ -z "${value}" ]; then
+        legacy_value="$(read_first_line "${LEGACY_WIZARD_DATA_DIR_FILE}")"
+        if [ -z "${legacy_value}" ]; then
+            legacy_value="$(read_first_line "${LEGACY_FALLBACK_WIZARD_DATA_DIR_FILE}")"
+        fi
+        if is_valid_absolute_path "${legacy_value}"; then
+            if [ -d "${legacy_value}/isos" ]; then
+                value="${legacy_value}/isos"
+            else
+                value="${legacy_value}"
+            fi
+        fi
+    fi
+    if is_valid_absolute_path "${value}"; then
+        BOOTIMUS_ISO_DIR="${value}"
+    fi
+    refresh_internal_paths
+}
+
+load_wizard_admin_password() {
+    value="$(read_first_line "${WIZARD_ADMIN_PASSWORD_FILE}")"
+    if [ -z "${value}" ]; then
+        value="$(read_first_line "${FALLBACK_WIZARD_ADMIN_PASSWORD_FILE}")"
+    fi
+    if [ -n "${value}" ]; then
+        BOOTIMUS_ADMIN_PASSWORD="${value}"
+    fi
+}
+
+load_wizard_network() {
+    value="$(read_first_line "${WIZARD_NETWORK_MODE_FILE}")"
+    if [ -z "${value}" ]; then
+        value="$(read_first_line "${FALLBACK_WIZARD_NETWORK_MODE_FILE}")"
+    fi
+    if is_valid_network_mode "${value}"; then
+        BOOTIMUS_NETWORK_MODE="${value}"
+    fi
+
+    value="$(read_first_line "${WIZARD_NETWORK_PARENT_FILE}")"
+    if [ -z "${value}" ]; then
+        value="$(read_first_line "${FALLBACK_WIZARD_NETWORK_PARENT_FILE}")"
+    fi
+    if is_valid_iface_name "${value}"; then
+        BOOTIMUS_NETWORK_PARENT="${value}"
+    fi
+
+    value="$(read_first_line "${WIZARD_NETWORK_ADDRESS_FILE}")"
+    if [ -z "${value}" ]; then
+        value="$(read_first_line "${FALLBACK_WIZARD_NETWORK_ADDRESS_FILE}")"
+    fi
+    if is_valid_ipv4_cidr "${value}"; then
+        BOOTIMUS_NETWORK_ADDRESS="${value}"
+    fi
+
+    value="$(read_first_line "${WIZARD_NETWORK_GATEWAY_FILE}")"
+    if [ -z "${value}" ]; then
+        value="$(read_first_line "${FALLBACK_WIZARD_NETWORK_GATEWAY_FILE}")"
+    fi
+    if is_valid_ipv4 "${value}"; then
+        BOOTIMUS_NETWORK_GATEWAY="${value}"
+    fi
+
+    value="$(read_first_line "${WIZARD_NETWORK_DHCP_FILE}")"
+    if [ -z "${value}" ]; then
+        value="$(read_first_line "${FALLBACK_WIZARD_NETWORK_DHCP_FILE}")"
+    fi
+    if is_truthy "${value}"; then
+        BOOTIMUS_NETWORK_DHCP="true"
+    elif [ -n "${value}" ]; then
+        BOOTIMUS_NETWORK_DHCP="false"
+    fi
+}
+
+normalize_network_config() {
+    if ! is_valid_network_mode "${BOOTIMUS_NETWORK_MODE}"; then
+        BOOTIMUS_NETWORK_MODE="host"
+    fi
+    if [ "${BOOTIMUS_NETWORK_MODE}" = "host" ]; then
+        BOOTIMUS_NETWORK_PARENT=""
+        BOOTIMUS_NETWORK_ADDRESS=""
+        BOOTIMUS_NETWORK_GATEWAY=""
+        BOOTIMUS_NETWORK_DHCP="false"
+        return 0
+    fi
+    if [ -n "${BOOTIMUS_NETWORK_PARENT}" ] && ! is_valid_iface_name "${BOOTIMUS_NETWORK_PARENT}"; then
+        BOOTIMUS_NETWORK_PARENT=""
+    fi
+    if [ -n "${BOOTIMUS_NETWORK_ADDRESS}" ] && ! is_valid_ipv4_cidr "${BOOTIMUS_NETWORK_ADDRESS}"; then
+        BOOTIMUS_NETWORK_ADDRESS=""
+    fi
+    if [ -z "${BOOTIMUS_NETWORK_ADDRESS}" ]; then
+        BOOTIMUS_NETWORK_DHCP="true"
+        BOOTIMUS_NETWORK_GATEWAY=""
+    elif ! is_truthy "${BOOTIMUS_NETWORK_DHCP}"; then
+        BOOTIMUS_NETWORK_DHCP="false"
+    fi
+    if [ -n "${BOOTIMUS_NETWORK_GATEWAY}" ] && ! is_valid_ipv4 "${BOOTIMUS_NETWORK_GATEWAY}"; then
+        BOOTIMUS_NETWORK_GATEWAY=""
+    fi
+}
+
+detect_default_parent_interface() {
+    ip route get 1.1.1.1 2>/dev/null | awk '
+        {
+            for (i = 1; i <= NF; i++) {
+                if ($i == "dev" && (i + 1) <= NF) {
+                    print $(i + 1)
+                    exit
+                }
+            }
+        }
+    '
+}
+
+shell_double_quote_value() {
+    printf '%s' "$1" | sed 's/[\"$`\\]/\\&/g'
+}
+
+write_config_from_template() {
+    tmp_file="${CONFIG_FILE}.tmp.$$"
+    awk -v data_dir="${BOOTIMUS_DATA_DIR}" '
+        BEGIN {
+            q = sprintf("%c", 39)
+            gsub(q, q q, data_dir)
+            data_line = "data_dir: " q data_dir q
+            replaced = 0
+        }
+        /^data_dir:[[:space:]]*/ {
+            print data_line
+            replaced = 1
+            next
+        }
+        { print }
+        END {
+            if (!replaced) {
+                print data_line
+            }
+        }
+    ' "${APPDEST}/bootimus.example.yaml" >"${tmp_file}"
+    mv "${tmp_file}" "${CONFIG_FILE}"
+}
+
+prepare_dirs() {
+    mkdir -p "${DATA_ROOT}" "${LOG_DIR}" "${WIZARD_DIR}" "${FALLBACK_WIZARD_DIR}" "${BOOTIMUS_DATA_DIR}" "${PKGVAR}/bin" "${PKGVAR}/run" "${BOOTIMUS_LAUNCH_DIR}" "${PKGETC}"
+}
+
+is_mounted_path() {
+    target="$1"
+    [ -d "${target}" ] || return 1
+    if command -v mountpoint >/dev/null 2>&1; then
+        mountpoint -q "${target}"
+        return $?
+    fi
+    awk -v target="${target}" '$2 == target { found = 1 } END { exit(found ? 0 : 1) }' /proc/mounts 2>/dev/null
+}
+
+unmount_internal_iso_dir() {
+    if is_mounted_path "${BOOTIMUS_INTERNAL_ISO_DIR}"; then
+        umount "${BOOTIMUS_INTERNAL_ISO_DIR}" 2>/dev/null || umount -l "${BOOTIMUS_INTERNAL_ISO_DIR}" 2>/dev/null || {
+            echo "failed to unmount ISO bind mount: ${BOOTIMUS_INTERNAL_ISO_DIR}"
+            return 1
+        }
+    fi
+}
+
+prepare_iso_dir() {
+    if [ -n "${BOOTIMUS_ISO_DIR}" ]; then
+        mkdir -p "${BOOTIMUS_ISO_DIR}" "${BOOTIMUS_INTERNAL_ISO_DIR}"
+        if [ -L "${BOOTIMUS_INTERNAL_ISO_DIR}" ]; then
+            rm -f "${BOOTIMUS_INTERNAL_ISO_DIR}"
+            mkdir -p "${BOOTIMUS_INTERNAL_ISO_DIR}"
+        fi
+        unmount_internal_iso_dir || return 1
+        mount --bind "${BOOTIMUS_ISO_DIR}" "${BOOTIMUS_INTERNAL_ISO_DIR}" || {
+            echo "failed to bind mount ISO directory ${BOOTIMUS_ISO_DIR} to ${BOOTIMUS_INTERNAL_ISO_DIR}"
+            return 1
+        }
+    else
+        mkdir -p "${BOOTIMUS_INTERNAL_ISO_DIR}"
+    fi
+}
+
+prepare_config() {
+    if [ ! -f "${CONFIG_FILE}" ]; then
+        write_config_from_template
+        chmod 600 "${CONFIG_FILE}" 2>/dev/null || true
+    fi
+    if [ ! -f "${ENV_FILE}" ]; then
+        escaped_bootimus_iso_dir="$(shell_double_quote_value "${BOOTIMUS_ISO_DIR}")"
+        cat >"${ENV_FILE}" <<EOF
+# Optional overrides read by the fnOS lifecycle script.
+BOOTIMUS_ISO_DIR="${escaped_bootimus_iso_dir}"
+BOOTIMUS_ADMIN_PASSWORD=""
+BOOTIMUS_NETWORK_MODE="host"
+BOOTIMUS_NETWORK_PARENT=""
+BOOTIMUS_NETWORK_ADDRESS=""
+BOOTIMUS_NETWORK_GATEWAY=""
+BOOTIMUS_NETWORK_DHCP="false"
+# BOOTIMUS_TFTP_PORT=69
+# BOOTIMUS_HTTP_PORT=8080
+# BOOTIMUS_ADMIN_PORT=8081
+# BOOTIMUS_NBD_PORT=10809
+# BOOTIMUS_PROXY_DHCP=true
+# BOOTIMUS_EXTRA_ARGS=
+EOF
+        chmod 600 "${ENV_FILE}" 2>/dev/null || true
+    fi
+}
+
+extract_generated_admin_password() {
+    awk '
+        /ADMIN PASSWORD GENERATED/ { in_block = 1; next }
+        in_block && /Password:/ {
+            line = $0
+            sub(/^.*Password:[[:space:]]*/, "", line)
+            sub(/[[:space:]]*[│║|].*$/, "", line)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
+            print line
+            exit
+        }
+    ' "${LOG_FILE}" 2>/dev/null | tail -n 1
+}
+
+api_json_value() {
+    key="$1"
+    sed -n "s/.*\"${key}\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" | head -n 1
+}
+
+json_string_escape() {
+    sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+run_in_bootimus_network() {
+    if [ "${BOOTIMUS_NETWORK_MODE}" = "host" ]; then
+        "$@"
+    else
+        ip netns exec "${BOOTIMUS_NETNS}" "$@"
+    fi
+}
+
+bootimus_admin_host() {
+    if [ "${BOOTIMUS_NETWORK_MODE}" = "host" ]; then
+        printf '127.0.0.1'
+    elif [ -n "${BOOTIMUS_NETWORK_ADDRESS}" ]; then
+        printf '%s' "${BOOTIMUS_NETWORK_ADDRESS%%/*}"
+    else
+        ip netns exec "${BOOTIMUS_NETNS}" ip -4 -o addr show dev "${BOOTIMUS_NETIF}" 2>/dev/null | awk 'NR == 1 { split($4, a, "/"); print a[1]; exit }'
+    fi
+}
+
+run_network_dhcp() {
+    if ! is_truthy "${BOOTIMUS_NETWORK_DHCP}"; then
+        return 0
+    fi
+    lifecycle_log "run_network_dhcp start netns=${BOOTIMUS_NETNS} iface=${BOOTIMUS_NETIF}"
+    if command -v udhcpc >/dev/null 2>&1; then
+        run_with_timeout 30 ip netns exec "${BOOTIMUS_NETNS}" udhcpc -q -n -i "${BOOTIMUS_NETIF}" -t 5 -T 3 || {
+            lifecycle_log "run_network_dhcp failed with udhcpc"
+            return 1
+        }
+    elif command -v dhclient >/dev/null 2>&1; then
+        run_with_timeout 30 ip netns exec "${BOOTIMUS_NETNS}" dhclient -1 "${BOOTIMUS_NETIF}" || {
+            lifecycle_log "run_network_dhcp failed with dhclient"
+            return 1
+        }
+    else
+        echo "no DHCP client found: need udhcpc or dhclient for independent IP DHCP mode"
+        lifecycle_log "run_network_dhcp failed: no DHCP client"
+        return 1
+    fi
+    BOOTIMUS_NETWORK_ADDRESS="$(ip netns exec "${BOOTIMUS_NETNS}" ip -4 -o addr show dev "${BOOTIMUS_NETIF}" 2>/dev/null | awk 'NR == 1 { print $4; exit }')"
+    if [ -z "${BOOTIMUS_NETWORK_ADDRESS}" ]; then
+        echo "DHCP finished but no IPv4 address was assigned to ${BOOTIMUS_NETIF}"
+        lifecycle_log "run_network_dhcp failed: no IPv4 address"
+        return 1
+    fi
+    lifecycle_log "run_network_dhcp assigned ${BOOTIMUS_NETWORK_ADDRESS}"
+}
+
+stop_launch_redirect() {
+    if [ -f "${BOOTIMUS_LAUNCH_PROXY_PID_FILE}" ]; then
+        pid="$(cat "${BOOTIMUS_LAUNCH_PROXY_PID_FILE}" 2>/dev/null || true)"
+        if is_running_pid "${pid}"; then
+            kill "${pid}" 2>/dev/null || true
+            for _ in 1 2 3; do
+                is_running_pid "${pid}" || break
+                sleep 1
+            done
+            if is_running_pid "${pid}"; then
+                kill -9 "${pid}" 2>/dev/null || true
+            fi
+        fi
+        rm -f "${BOOTIMUS_LAUNCH_PROXY_PID_FILE}"
+    fi
+}
+
+record_launch_redirect_pid() {
+    pid="$1"
+    echo "${pid}" >"${BOOTIMUS_LAUNCH_PROXY_PID_FILE}"
+    sleep 1
+    if ! is_running_pid "${pid}"; then
+        rm -f "${BOOTIMUS_LAUNCH_PROXY_PID_FILE}"
+        echo "host launch redirect failed to stay running on port ${ADMIN_PORT}"
+        return 1
+    fi
+}
+
+start_launch_redirect() {
+    [ "${BOOTIMUS_NETWORK_MODE}" != "host" ] || return 0
+
+    stop_launch_redirect
+    target_ip="$(bootimus_admin_host)"
+    target_url="http://${target_ip}:${ADMIN_PORT}/"
+    index_file="${BOOTIMUS_LAUNCH_DIR}/index.html"
+    cat >"${index_file}" <<EOF
+<!doctype html>
+<meta charset="utf-8">
+<meta http-equiv="refresh" content="0;url=${target_url}">
+<title>Bootimus</title>
+<a href="${target_url}">打开 Bootimus 管理界面</a>
+EOF
+
+    if command -v busybox >/dev/null 2>&1 && busybox httpd -h 2>/dev/null | grep -q -- '-p'; then
+        nohup busybox httpd -f -p "0.0.0.0:${ADMIN_PORT}" -h "${BOOTIMUS_LAUNCH_DIR}" >>"${LOG_FILE}" 2>&1 &
+        record_launch_redirect_pid "$!" || return 1
+        return 0
+    fi
+
+    if command -v httpd >/dev/null 2>&1 && httpd -h 2>&1 | grep -q 'BusyBox'; then
+        nohup httpd -f -p "0.0.0.0:${ADMIN_PORT}" -h "${BOOTIMUS_LAUNCH_DIR}" >>"${LOG_FILE}" 2>&1 &
+        record_launch_redirect_pid "$!" || return 1
+        return 0
+    fi
+
+    command -v python3 >/dev/null 2>&1 || command -v python >/dev/null 2>&1 || {
+        echo "python/httpd is unavailable; cannot start host launch redirect for independent IP mode"
+        return 1
+    }
+
+    redirect_script="${BOOTIMUS_LAUNCH_DIR}/launch_redirect.py"
+    cat >"${redirect_script}" <<'PY'
+import os
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+target = os.environ["BOOTIMUS_REDIRECT_TARGET"]
+port = int(os.environ.get("BOOTIMUS_REDIRECT_PORT", "8081"))
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(302)
+        self.send_header("Location", target)
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        body = (
+            "<!doctype html><meta charset='utf-8'>"
+            "<meta http-equiv='refresh' content='0;url=%s'>"
+            "<title>Bootimus</title>"
+            "<a href='%s'>打开 Bootimus 管理界面</a>" % (target, target)
+        ).encode("utf-8")
+        self.wfile.write(body)
+
+    def log_message(self, fmt, *args):
+        return
+
+ThreadingHTTPServer(("0.0.0.0", port), Handler).serve_forever()
+PY
+
+    python_bin="$(command -v python3 2>/dev/null || command -v python)"
+    BOOTIMUS_REDIRECT_TARGET="${target_url}" BOOTIMUS_REDIRECT_PORT="${ADMIN_PORT}" \
+        nohup "${python_bin}" "${redirect_script}" >>"${LOG_FILE}" 2>&1 &
+    record_launch_redirect_pid "$!" || return 1
+}
+
+cleanup_network_namespace() {
+    stop_launch_redirect
+    if command -v ip >/dev/null 2>&1; then
+        ip netns delete "${BOOTIMUS_NETNS}" 2>/dev/null || true
+    fi
+}
+
+prepare_network_namespace() {
+    lifecycle_log "prepare_network_namespace enter mode=${BOOTIMUS_NETWORK_MODE} parent=${BOOTIMUS_NETWORK_PARENT} address=${BOOTIMUS_NETWORK_ADDRESS} dhcp=${BOOTIMUS_NETWORK_DHCP}"
+    normalize_network_config
+    [ "${BOOTIMUS_NETWORK_MODE}" != "host" ] || {
+        lifecycle_log "prepare_network_namespace skipped for host mode"
+        return 0
+    }
+    if is_truthy "${BOOTIMUS_NETWORK_DHCP}" && [ "${BOOTIMUS_NETWORK_MODE}" = "ipvlan" ]; then
+        lifecycle_log "DHCP uses macvlan; switching network mode from ipvlan to macvlan for DHCP lease"
+        BOOTIMUS_NETWORK_MODE="macvlan"
+    fi
+
+    command -v ip >/dev/null 2>&1 || {
+        echo "ip command is required for independent IP mode"
+        lifecycle_log "prepare_network_namespace failed: ip command missing"
+        return 1
+    }
+    if [ -z "${BOOTIMUS_NETWORK_PARENT}" ]; then
+        BOOTIMUS_NETWORK_PARENT="$(detect_default_parent_interface)"
+        if [ -n "${BOOTIMUS_NETWORK_PARENT}" ]; then
+            echo "$(date '+%Y-%m-%d %H:%M:%S') auto-detected BOOTIMUS_NETWORK_PARENT=${BOOTIMUS_NETWORK_PARENT}" >>"${LOG_FILE}" 2>/dev/null || true
+        fi
+    fi
+    if ! is_valid_iface_name "${BOOTIMUS_NETWORK_PARENT}"; then
+        echo "could not determine a valid parent interface for independent IP mode"
+        lifecycle_log "prepare_network_namespace failed: invalid parent"
+        return 1
+    fi
+    ip link show "${BOOTIMUS_NETWORK_PARENT}" >/dev/null 2>&1 || {
+        echo "network parent interface does not exist: ${BOOTIMUS_NETWORK_PARENT}"
+        lifecycle_log "prepare_network_namespace failed: parent missing ${BOOTIMUS_NETWORK_PARENT}"
+        return 1
+    }
+
+    cleanup_network_namespace
+    lifecycle_log "prepare_network_namespace creating ${BOOTIMUS_NETNS} mode=${BOOTIMUS_NETWORK_MODE} parent=${BOOTIMUS_NETWORK_PARENT}"
+    ip netns add "${BOOTIMUS_NETNS}" || return 1
+    case "${BOOTIMUS_NETWORK_MODE}" in
+        ipvlan)
+            ip link add "${BOOTIMUS_NETIF}" link "${BOOTIMUS_NETWORK_PARENT}" type ipvlan mode l2 || {
+                lifecycle_log "prepare_network_namespace failed: ipvlan link add"
+                cleanup_network_namespace
+                return 1
+            }
+            ;;
+        macvlan)
+            ip link add "${BOOTIMUS_NETIF}" link "${BOOTIMUS_NETWORK_PARENT}" type macvlan mode bridge || {
+                lifecycle_log "prepare_network_namespace failed: macvlan link add"
+                cleanup_network_namespace
+                return 1
+            }
+            ;;
+    esac
+    ip link set "${BOOTIMUS_NETIF}" netns "${BOOTIMUS_NETNS}" || {
+        lifecycle_log "prepare_network_namespace failed: move interface to netns"
+        cleanup_network_namespace
+        return 1
+    }
+    ip netns exec "${BOOTIMUS_NETNS}" ip link set lo up || {
+        lifecycle_log "prepare_network_namespace failed: set lo up"
+        cleanup_network_namespace
+        return 1
+    }
+    ip netns exec "${BOOTIMUS_NETNS}" ip link set "${BOOTIMUS_NETIF}" up || {
+        lifecycle_log "prepare_network_namespace failed: set netif up"
+        cleanup_network_namespace
+        return 1
+    }
+    if is_truthy "${BOOTIMUS_NETWORK_DHCP}"; then
+        run_network_dhcp || {
+            cleanup_network_namespace
+            return 1
+        }
+    else
+        ip netns exec "${BOOTIMUS_NETNS}" ip addr add "${BOOTIMUS_NETWORK_ADDRESS}" dev "${BOOTIMUS_NETIF}" || {
+            lifecycle_log "prepare_network_namespace failed: static addr add"
+            cleanup_network_namespace
+            return 1
+        }
+    fi
+    if [ -n "${BOOTIMUS_NETWORK_GATEWAY}" ] && ! is_truthy "${BOOTIMUS_NETWORK_DHCP}"; then
+        ip netns exec "${BOOTIMUS_NETNS}" ip route add default via "${BOOTIMUS_NETWORK_GATEWAY}" || {
+            lifecycle_log "prepare_network_namespace failed: route add"
+            cleanup_network_namespace
+            return 1
+        }
+    fi
+    start_launch_redirect || {
+        lifecycle_log "prepare_network_namespace failed: launch redirect"
+        cleanup_network_namespace
+        return 1
+    }
+    lifecycle_log "prepare_network_namespace ready mode=${BOOTIMUS_NETWORK_MODE} parent=${BOOTIMUS_NETWORK_PARENT} address=${BOOTIMUS_NETWORK_ADDRESS}"
+}
+
+apply_admin_password() {
+    [ -n "${BOOTIMUS_ADMIN_PASSWORD}" ] || return 0
+
+    applied_marker="${DATA_ROOT}/wizard/admin_password_applied"
+    desired_hash="$(printf '%s' "${BOOTIMUS_ADMIN_PASSWORD}" | md5sum | awk '{print $1}')"
+    if [ -f "${applied_marker}" ] && [ "$(read_first_line "${applied_marker}")" = "${desired_hash}" ]; then
+        return 0
+    fi
+
+    generated_password=""
+    login_response=""
+    token=""
+    generated_password_json=""
+    for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+        generated_password="$(extract_generated_admin_password)"
+        if [ -n "${generated_password}" ]; then
+            generated_password_json="$(printf '%s' "${generated_password}" | json_string_escape)"
+            login_response="$(run_in_bootimus_network curl -fsS -m 3 \
+                -H 'Content-Type: application/json' \
+                -d "{\"username\":\"admin\",\"password\":\"${generated_password_json}\",\"auth_method\":\"local\"}" \
+                "http://127.0.0.1:${ADMIN_PORT}/api/login" 2>/dev/null || true)"
+            token="$(printf '%s' "${login_response}" | api_json_value token)"
+            if [ -n "${token}" ]; then
+                break
+            fi
+        fi
+        sleep 1
+    done
+
+    if [ -z "${token}" ]; then
+        echo "$(date '+%Y-%m-%d %H:%M:%S') custom admin password not applied: could not log in with generated password" >>"${LOG_FILE}" 2>/dev/null || true
+        return 0
+    fi
+
+    admin_password_json="$(printf '%s' "${BOOTIMUS_ADMIN_PASSWORD}" | json_string_escape)"
+    reset_response="$(run_in_bootimus_network curl -fsS -m 5 \
+        -H 'Content-Type: application/json' \
+        -H "Authorization: Bearer ${token}" \
+        -d "{\"username\":\"admin\",\"new_password\":\"${admin_password_json}\"}" \
+        "http://127.0.0.1:${ADMIN_PORT}/api/users/reset-password" 2>/dev/null || true)"
+
+    if printf '%s' "${reset_response}" | grep -q '"success"[[:space:]]*:[[:space:]]*true'; then
+        printf '%s\n' "${desired_hash}" >"${applied_marker}" 2>/dev/null || true
+        chmod 600 "${applied_marker}" 2>/dev/null || true
+        echo "$(date '+%Y-%m-%d %H:%M:%S') custom admin password applied from install wizard" >>"${LOG_FILE}" 2>/dev/null || true
+    else
+        echo "$(date '+%Y-%m-%d %H:%M:%S') custom admin password not applied: reset API failed" >>"${LOG_FILE}" 2>/dev/null || true
+    fi
+}
+
+prepare_binary() {
+    if [ ! -f "${APPDEST}/bootimus" ]; then
+        echo "source binary does not exist: ${APPDEST}/bootimus"
+        return 1
+    fi
+    cp -f "${APPDEST}/bootimus" "${RUNTIME_BIN}"
+    chmod 755 "${RUNTIME_BIN}"
+}
+
+is_running_pid() {
+    pid="${1:-}"
+    [ -n "${pid}" ] && kill -0 "${pid}" 2>/dev/null
+}
+
+status_app() {
+    if [ -f "${PID_FILE}" ] && is_running_pid "$(cat "${PID_FILE}")"; then
+        echo "running"
+        return 0
+    fi
+    echo "stopped"
+    return 3
+}
+
+start_app() {
+    lifecycle_log "start_app entered"
+    load_env_file
+    lifecycle_log "start_app loaded env"
+    load_wizard_iso_dir
+    load_wizard_admin_password
+    load_wizard_network
+    normalize_network_config
+    lifecycle_log "start_app loaded wizard mode=${BOOTIMUS_NETWORK_MODE} parent=${BOOTIMUS_NETWORK_PARENT} address=${BOOTIMUS_NETWORK_ADDRESS} dhcp=${BOOTIMUS_NETWORK_DHCP}"
+    prepare_dirs
+    lifecycle_log "start_app prepared dirs"
+    prepare_iso_dir || {
+        lifecycle_log "start_app failed in prepare_iso_dir"
+        write_temp_log
+        return 1
+    }
+    lifecycle_log "start_app prepared iso dir"
+    prepare_config
+    lifecycle_log "start_app prepared config"
+    prepare_binary || {
+        lifecycle_log "start_app failed in prepare_binary"
+        write_temp_log
+        return 1
+    }
+    lifecycle_log "start_app prepared binary"
+
+    if [ -f "${PID_FILE}" ] && is_running_pid "$(cat "${PID_FILE}")"; then
+        echo "already running"
+        return 0
+    fi
+
+    proxy_flag=""
+    case "${PROXY_DHCP}" in
+        1|true|TRUE|yes|YES|on|ON)
+            proxy_flag="--proxy-dhcp"
+            ;;
+    esac
+
+    {
+        echo
+        echo "===== $(date '+%Y-%m-%d %H:%M:%S') starting Bootimus ====="
+        echo "app_files=${DATA_ROOT} bootimus_data=${BOOTIMUS_DATA_DIR} iso_dir=${BOOTIMUS_ISO_DIR:-${BOOTIMUS_INTERNAL_ISO_DIR}} admin=${ADMIN_PORT} http=${HTTP_PORT} tftp=${TFTP_PORT} proxy_dhcp=${PROXY_DHCP}"
+        echo "network_mode=${BOOTIMUS_NETWORK_MODE} parent=${BOOTIMUS_NETWORK_PARENT} address=${BOOTIMUS_NETWORK_ADDRESS} gateway=${BOOTIMUS_NETWORK_GATEWAY} netns=${BOOTIMUS_NETNS}"
+    } >>"${LOG_FILE}" 2>&1
+
+    prepare_network_namespace || {
+        lifecycle_log "start_app failed in prepare_network_namespace"
+        write_temp_log
+        return 1
+    }
+    lifecycle_log "start_app prepared network"
+
+    if [ "${BOOTIMUS_NETWORK_MODE}" = "host" ]; then
+        # shellcheck disable=SC2086
+        nohup "${RUNTIME_BIN}" \
+            --config "${CONFIG_FILE}" \
+            --data-dir "${BOOTIMUS_DATA_DIR}" \
+            --tftp-port "${TFTP_PORT}" \
+            --http-port "${HTTP_PORT}" \
+            --admin-port "${ADMIN_PORT}" \
+            --nbd-port "${NBD_PORT}" \
+            ${proxy_flag} ${EXTRA_ARGS} \
+            serve >>"${LOG_FILE}" 2>&1 &
+    else
+        # shellcheck disable=SC2086
+        nohup ip netns exec "${BOOTIMUS_NETNS}" "${RUNTIME_BIN}" \
+            --config "${CONFIG_FILE}" \
+            --data-dir "${BOOTIMUS_DATA_DIR}" \
+            --tftp-port "${TFTP_PORT}" \
+            --http-port "${HTTP_PORT}" \
+            --admin-port "${ADMIN_PORT}" \
+            --nbd-port "${NBD_PORT}" \
+            ${proxy_flag} ${EXTRA_ARGS} \
+            serve >>"${LOG_FILE}" 2>&1 &
+    fi
+
+    pid="$!"
+    echo "${pid}" >"${PID_FILE}"
+    lifecycle_log "start_app spawned bootimus pid=${pid}"
+    sleep 2
+    if ! is_running_pid "${pid}"; then
+        cleanup_network_namespace
+        lifecycle_log "start_app bootimus process exited early"
+        write_temp_log
+        echo "failed"
+        return 1
+    fi
+
+    apply_admin_password
+    lifecycle_log "start_app completed"
+    echo "started"
+}
+
+stop_app() {
+    lifecycle_log "stop_app entered"
+    load_env_file
+    load_wizard_iso_dir
+    load_wizard_admin_password
+    load_wizard_network
+    normalize_network_config
+    if [ -f "${PID_FILE}" ]; then
+        pid="$(cat "${PID_FILE}")"
+        if is_running_pid "${pid}"; then
+            kill "${pid}" 2>/dev/null || true
+            for _ in 1 2 3 4 5; do
+                is_running_pid "${pid}" || break
+                sleep 1
+            done
+            if is_running_pid "${pid}"; then
+                kill -9 "${pid}" 2>/dev/null || true
+            fi
+        fi
+        rm -f "${PID_FILE}"
+    fi
+    cleanup_network_namespace
+    unmount_internal_iso_dir || true
+    lifecycle_log "stop_app completed"
+    echo "stopped"
+}
+
+case "${1:-status}" in
+    start)
+        start_app
+        ;;
+    stop)
+        stop_app
+        ;;
+    restart)
+        stop_app
+        start_app
+        ;;
+    status)
+        status_app
+        ;;
+    *)
+        echo "usage: $0 {start|stop|restart|status}"
+        exit 2
+        ;;
+esac

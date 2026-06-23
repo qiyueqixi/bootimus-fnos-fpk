@@ -1,0 +1,15 @@
+{
+  "port": 8081,
+  "data-share": {
+    "shares": [
+      {
+        "name": "bootimus",
+        "permission": {
+          "rw": [
+            "App.Native.Bootimus"
+          ]
+        }
+      }
+    ]
+  }
+}

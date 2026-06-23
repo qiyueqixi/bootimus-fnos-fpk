@@ -1,0 +1,216 @@
+#!/bin/bash
+
+APPNAME="App.Native.Bootimus"
+PKGVAR="${TRIM_PKGVAR:-/var/apps/${APPNAME}/var}"
+
+first_data_share_path() {
+    if [ -n "${TRIM_DATA_SHARE_PATHS:-}" ]; then
+        printf '%s' "${TRIM_DATA_SHARE_PATHS}" | tr ':;' '\n\n' | awk 'NF { print; exit }'
+        return 0
+    fi
+    if [ -d "/var/apps/${APPNAME}/shares/bootimus" ]; then
+        printf '/var/apps/%s/shares/bootimus' "${APPNAME}"
+        return 0
+    fi
+    printf '/var/apps/%s/data/bootimus' "${APPNAME}"
+}
+
+trim_value() {
+    printf '%s' "$1" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+}
+
+get_wizard_env_value() {
+    key="$1"
+    upper_key="$(printf '%s' "${key}" | tr '[:lower:]' '[:upper:]')"
+    eval "printf '%s' \"\${${key}:-\${${upper_key}:-}}\""
+}
+
+is_valid_absolute_path() {
+    value="$1"
+    case "${value}" in
+        "")
+            return 1
+            ;;
+        /*)
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    if printf '%s' "${value}" | LC_ALL=C grep -q '[[:cntrl:]]'; then
+        return 1
+    fi
+    return 0
+}
+
+is_valid_network_mode() {
+    case "$1" in
+        host|ipvlan|macvlan)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+is_valid_iface_name() {
+    value="$1"
+    [ -n "${value}" ] || return 1
+    printf '%s' "${value}" | LC_ALL=C grep -Eq '^[A-Za-z0-9_.:@-]+$'
+}
+
+is_valid_ipv4_cidr() {
+    value="$1"
+    printf '%s' "${value}" | LC_ALL=C grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$'
+}
+
+is_valid_ipv4() {
+    value="$1"
+    printf '%s' "${value}" | LC_ALL=C grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$'
+}
+
+shell_double_quote_value() {
+    printf '%s' "$1" | sed 's/[\"$`\\]/\\&/g'
+}
+
+APP_SHARE="$(first_data_share_path)"
+WIZARD_DIR="${APP_SHARE}/wizard"
+FALLBACK_WIZARD_DIR="${PKGVAR}/wizard"
+ENV_FILE="${APP_SHARE}/bootimus.env"
+LOG_DIR="${APP_SHARE}/logs"
+LOG_FILE="${LOG_DIR}/bootimus.log"
+
+mkdir -p "${APP_SHARE}" "${WIZARD_DIR}" "${FALLBACK_WIZARD_DIR}" "${LOG_DIR}" || exit 1
+
+wizard_iso_dir="$(trim_value "$(get_wizard_env_value "wizard_bootimus_iso_dir")")"
+if [ -z "${wizard_iso_dir}" ]; then
+    legacy_data_dir="$(trim_value "$(get_wizard_env_value "wizard_bootimus_data_dir")")"
+    if is_valid_absolute_path "${legacy_data_dir}" && [ -d "${legacy_data_dir}/isos" ]; then
+        wizard_iso_dir="${legacy_data_dir}/isos"
+    else
+        wizard_iso_dir="${legacy_data_dir}"
+    fi
+fi
+if ! is_valid_absolute_path "${wizard_iso_dir}"; then
+    wizard_iso_dir=""
+fi
+
+wizard_admin_password="$(get_wizard_env_value "wizard_bootimus_admin_password" | tr -d '\r')"
+wizard_network_mode="$(trim_value "$(get_wizard_env_value "wizard_bootimus_network_mode")")"
+wizard_network_parent="$(trim_value "$(get_wizard_env_value "wizard_bootimus_network_parent")")"
+wizard_network_address="$(trim_value "$(get_wizard_env_value "wizard_bootimus_network_address")")"
+wizard_network_gateway="$(trim_value "$(get_wizard_env_value "wizard_bootimus_network_gateway")")"
+raw_wizard_network_mode="${wizard_network_mode}"
+raw_wizard_network_parent="${wizard_network_parent}"
+raw_wizard_network_address="${wizard_network_address}"
+raw_wizard_network_gateway="${wizard_network_gateway}"
+wizard_network_dhcp="false"
+
+if ! is_valid_network_mode "${wizard_network_mode}"; then
+    wizard_network_mode="host"
+fi
+
+if [ "${wizard_network_mode}" = "host" ]; then
+    wizard_network_parent=""
+    wizard_network_address=""
+    wizard_network_gateway=""
+    wizard_network_dhcp="false"
+else
+    is_valid_iface_name "${wizard_network_parent}" || wizard_network_parent=""
+    if [ -n "${wizard_network_address}" ] && ! is_valid_ipv4_cidr "${wizard_network_address}"; then
+        wizard_network_address=""
+    fi
+    if [ -n "${wizard_network_gateway}" ] && ! is_valid_ipv4 "${wizard_network_gateway}"; then
+        wizard_network_gateway=""
+    fi
+    if [ -z "${wizard_network_parent}" ]; then
+        wizard_network_parent=""
+    fi
+    if [ -z "${wizard_network_address}" ]; then
+        wizard_network_dhcp="true"
+        wizard_network_gateway=""
+        if [ "${wizard_network_mode}" = "ipvlan" ]; then
+            wizard_network_mode="macvlan"
+        fi
+    fi
+fi
+
+if [ -n "${wizard_iso_dir}" ]; then
+    printf '%s\n' "${wizard_iso_dir}" >"${WIZARD_DIR}/bootimus_iso_dir" || exit 1
+    printf '%s\n' "${wizard_iso_dir}" >"${FALLBACK_WIZARD_DIR}/bootimus_iso_dir" || exit 1
+else
+    rm -f "${WIZARD_DIR}/bootimus_iso_dir" "${FALLBACK_WIZARD_DIR}/bootimus_iso_dir" 2>/dev/null || true
+fi
+
+if [ -n "${wizard_admin_password}" ]; then
+    printf '%s\n' "${wizard_admin_password}" >"${WIZARD_DIR}/bootimus_admin_password" || exit 1
+    printf '%s\n' "${wizard_admin_password}" >"${FALLBACK_WIZARD_DIR}/bootimus_admin_password" || exit 1
+else
+    rm -f "${WIZARD_DIR}/bootimus_admin_password" "${FALLBACK_WIZARD_DIR}/bootimus_admin_password" 2>/dev/null || true
+fi
+
+printf '%s\n' "${wizard_network_mode}" >"${WIZARD_DIR}/bootimus_network_mode" || exit 1
+printf '%s\n' "${wizard_network_mode}" >"${FALLBACK_WIZARD_DIR}/bootimus_network_mode" || exit 1
+
+if [ -n "${wizard_network_parent}" ]; then
+    printf '%s\n' "${wizard_network_parent}" >"${WIZARD_DIR}/bootimus_network_parent" || exit 1
+    printf '%s\n' "${wizard_network_parent}" >"${FALLBACK_WIZARD_DIR}/bootimus_network_parent" || exit 1
+else
+    rm -f "${WIZARD_DIR}/bootimus_network_parent" "${FALLBACK_WIZARD_DIR}/bootimus_network_parent" 2>/dev/null || true
+fi
+
+if [ -n "${wizard_network_address}" ]; then
+    printf '%s\n' "${wizard_network_address}" >"${WIZARD_DIR}/bootimus_network_address" || exit 1
+    printf '%s\n' "${wizard_network_address}" >"${FALLBACK_WIZARD_DIR}/bootimus_network_address" || exit 1
+else
+    rm -f "${WIZARD_DIR}/bootimus_network_address" "${FALLBACK_WIZARD_DIR}/bootimus_network_address" 2>/dev/null || true
+fi
+
+if [ -n "${wizard_network_gateway}" ]; then
+    printf '%s\n' "${wizard_network_gateway}" >"${WIZARD_DIR}/bootimus_network_gateway" || exit 1
+    printf '%s\n' "${wizard_network_gateway}" >"${FALLBACK_WIZARD_DIR}/bootimus_network_gateway" || exit 1
+else
+    rm -f "${WIZARD_DIR}/bootimus_network_gateway" "${FALLBACK_WIZARD_DIR}/bootimus_network_gateway" 2>/dev/null || true
+fi
+
+printf '%s\n' "${wizard_network_dhcp}" >"${WIZARD_DIR}/bootimus_network_dhcp" || exit 1
+printf '%s\n' "${wizard_network_dhcp}" >"${FALLBACK_WIZARD_DIR}/bootimus_network_dhcp" || exit 1
+
+if [ ! -f "${ENV_FILE}" ]; then
+    escaped_wizard_iso_dir="$(shell_double_quote_value "${wizard_iso_dir}")"
+    escaped_wizard_admin_password="$(shell_double_quote_value "${wizard_admin_password}")"
+    escaped_wizard_network_mode="$(shell_double_quote_value "${wizard_network_mode}")"
+    escaped_wizard_network_parent="$(shell_double_quote_value "${wizard_network_parent}")"
+    escaped_wizard_network_address="$(shell_double_quote_value "${wizard_network_address}")"
+    escaped_wizard_network_gateway="$(shell_double_quote_value "${wizard_network_gateway}")"
+    escaped_wizard_network_dhcp="$(shell_double_quote_value "${wizard_network_dhcp}")"
+    cat >"${ENV_FILE}" <<EOF
+# Optional overrides read by the fnOS lifecycle script.
+BOOTIMUS_ISO_DIR="${escaped_wizard_iso_dir}"
+BOOTIMUS_ADMIN_PASSWORD="${escaped_wizard_admin_password}"
+BOOTIMUS_NETWORK_MODE="${escaped_wizard_network_mode}"
+BOOTIMUS_NETWORK_PARENT="${escaped_wizard_network_parent}"
+BOOTIMUS_NETWORK_ADDRESS="${escaped_wizard_network_address}"
+BOOTIMUS_NETWORK_GATEWAY="${escaped_wizard_network_gateway}"
+BOOTIMUS_NETWORK_DHCP="${escaped_wizard_network_dhcp}"
+# BOOTIMUS_TFTP_PORT=69
+# BOOTIMUS_HTTP_PORT=8080
+# BOOTIMUS_ADMIN_PORT=8081
+# BOOTIMUS_NBD_PORT=10809
+# BOOTIMUS_PROXY_DHCP=true
+# BOOTIMUS_EXTRA_ARGS=
+EOF
+    chmod 600 "${ENV_FILE}" 2>/dev/null || true
+fi
+
+{
+    echo "$(date '+%Y-%m-%d %H:%M:%S') wizard raw network values mode=${raw_wizard_network_mode} parent=${raw_wizard_network_parent} address=${raw_wizard_network_address} gateway=${raw_wizard_network_gateway}"
+    echo "$(date '+%Y-%m-%d %H:%M:%S') install wizard saved BOOTIMUS_ISO_DIR=${wizard_iso_dir}"
+    echo "$(date '+%Y-%m-%d %H:%M:%S') install wizard saved BOOTIMUS_NETWORK_MODE=${wizard_network_mode} parent=${wizard_network_parent} address=${wizard_network_address} gateway=${wizard_network_gateway} dhcp=${wizard_network_dhcp}"
+    if [ -n "${wizard_admin_password}" ]; then
+        echo "$(date '+%Y-%m-%d %H:%M:%S') install wizard saved custom admin password"
+    fi
+} >>"${LOG_FILE}" 2>/dev/null || true
+
+exit 0

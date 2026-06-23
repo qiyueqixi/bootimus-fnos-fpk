@@ -1,0 +1,7 @@
+{
+  "defaults": {
+    "run-as": "root"
+  },
+  "username": "App.Native.Bootimus",
+  "groupname": "App.Native.Bootimus"
+}

@@ -1,0 +1,37 @@
+[
+  {
+    "stepTitle": "卸载数据处理",
+    "items": [
+      {
+        "type": "tips",
+        "helpText": "请选择卸载 Bootimus 时如何处理应用配置、日志和运行缓存。默认保留用户数据，方便以后重新安装继续使用。ISO 目录始终保留，不会在卸载时删除。"
+      },
+      {
+        "type": "radio",
+        "field": "wizard_uninstall_data_action",
+        "label": "数据处理方式",
+        "initValue": "keep_all",
+        "options": [
+          {
+            "label": "保留用户数据",
+            "value": "keep_all"
+          },
+          {
+            "label": "清除全部数据（保留 ISO 目录）",
+            "value": "delete_all"
+          }
+        ],
+        "rules": [
+          {
+            "required": true,
+            "message": "请选择卸载时的数据处理方式"
+          }
+        ]
+      },
+      {
+        "type": "tips",
+        "helpText": "选择“清除全部数据”只会删除飞牛应用文件里的 bootimus 目录和应用运行目录；安装时填写的 Bootimus ISO/数据目录会保留。"
+      }
+    ]
+  }
+]

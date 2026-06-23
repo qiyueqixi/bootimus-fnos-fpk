@@ -1,0 +1,118 @@
+#!/bin/bash
+
+APPNAME="App.Native.Bootimus"
+PKGVAR="${TRIM_PKGVAR:-/var/apps/${APPNAME}/var}"
+
+first_data_share_path() {
+    if [ -n "${TRIM_DATA_SHARE_PATHS:-}" ]; then
+        printf '%s' "${TRIM_DATA_SHARE_PATHS}" | tr ':;' '\n\n' | awk 'NF { print; exit }'
+        return 0
+    fi
+    if [ -d "/var/apps/${APPNAME}/shares/bootimus" ]; then
+        printf '/var/apps/%s/shares/bootimus' "${APPNAME}"
+        return 0
+    fi
+    printf '/var/apps/%s/data/bootimus' "${APPNAME}"
+}
+
+trim_value() {
+    printf '%s' "$1" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+}
+
+get_wizard_env_value() {
+    key="$1"
+    upper_key="$(printf '%s' "${key}" | tr '[:lower:]' '[:upper:]')"
+    eval "printf '%s' \"\${${key}:-\${${upper_key}:-}}\""
+}
+
+read_first_line() {
+    if [ -f "$1" ]; then
+        sed -n '1{s/\r$//;p;q;}' "$1"
+    fi
+}
+
+APP_SHARE="$(first_data_share_path)"
+DATA_ROOT="${APP_SHARE}"
+APP_DATA_DIR="${DATA_ROOT}/data"
+BOOTIMUS_INTERNAL_ISO_DIR="${APP_DATA_DIR}/isos"
+LOG_DIR="${DATA_ROOT}/logs"
+LOG_FILE="${LOG_DIR}/bootimus.log"
+WIZARD_DIR="${DATA_ROOT}/wizard"
+FALLBACK_WIZARD_DIR="${PKGVAR}/wizard"
+
+log_msg() {
+    mkdir -p "${LOG_DIR}" 2>/dev/null || true
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $*" >>"${LOG_FILE}" 2>/dev/null || true
+}
+
+is_safe_delete_path() {
+    target="$1"
+    case "${target}" in
+        ""|"/"|"/var"|"/var/"|"/var/apps"|"/var/apps/"|"/var/apps/${APPNAME}"|"/var/apps/${APPNAME}/"|"/var/apps/${APPNAME}/target"|"/var/apps/${APPNAME}/var"|"/vol"*"/1000"|"/vol"*"/1000/"|"/vol"*"/@appshare"|"/vol"*"/@appshare/")
+            return 1
+            ;;
+        "/var/apps/${APPNAME}/"*|"/vol"*"/1000/"*|"/vol"*"/@appshare/"*)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+safe_delete_tree() {
+    target="$1"
+    [ -n "${target}" ] || return 0
+    if is_safe_delete_path "${target}"; then
+        rm -rf "${target}" 2>/dev/null || true
+    else
+        log_msg "refuse to delete unsafe path: ${target}"
+        return 1
+    fi
+}
+
+is_mounted_path() {
+    target="$1"
+    [ -d "${target}" ] || return 1
+    if command -v mountpoint >/dev/null 2>&1; then
+        mountpoint -q "${target}"
+        return $?
+    fi
+    awk -v target="${target}" '$2 == target { found = 1 } END { exit(found ? 0 : 1) }' /proc/mounts 2>/dev/null
+}
+
+unmount_internal_iso_dir() {
+    if is_mounted_path "${BOOTIMUS_INTERNAL_ISO_DIR}"; then
+        umount "${BOOTIMUS_INTERNAL_ISO_DIR}" 2>/dev/null || umount -l "${BOOTIMUS_INTERNAL_ISO_DIR}" 2>/dev/null || {
+            log_msg "failed to unmount ISO bind mount: ${BOOTIMUS_INTERNAL_ISO_DIR}"
+            return 1
+        }
+    fi
+}
+
+delete_all_data() {
+    log_msg "uninstall requested; deleting all app data"
+    log_msg "preserving bootimus ISO/data directory"
+    unmount_internal_iso_dir || true
+    safe_delete_tree "${FALLBACK_WIZARD_DIR}" || true
+    safe_delete_tree "${DATA_ROOT}" || true
+}
+
+action="$(trim_value "$(get_wizard_env_value "wizard_uninstall_data_action")")"
+if [ -z "${action}" ]; then
+    action="keep_all"
+fi
+
+case "${action}" in
+    keep_all)
+        log_msg "uninstall requested; keeping user data"
+        ;;
+    delete_all)
+        delete_all_data
+        ;;
+    *)
+        log_msg "unknown uninstall data action ${action}; keeping user data"
+        ;;
+esac
+
+exit 0
